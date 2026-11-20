@@ -80,7 +80,9 @@ function toPublicService(doc) {
     },
     approved: doc.approved === true,
     active: doc.active === true,
-    image: doc.serviceImage,
+    image: doc.serviceImage ?? doc.images?.[0],
+    images: doc.images ?? (doc.serviceImage ? [doc.serviceImage] : []),
+    description: doc.description ?? "",
     buttonText: doc.buttonText ?? 'View Details',
   };
 }
@@ -245,3 +247,5 @@ async function run() {
 run().catch(() => {
   process.exit(1);
 });
+
+export default app;git

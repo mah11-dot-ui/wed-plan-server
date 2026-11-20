@@ -156,6 +156,11 @@ export function registerSecureRoutes(app, collections) {
     }
 
     const { serviceName, category, description, price, location, serviceImage } = req.body
+    const images =
+      Array.isArray(req.body.images) && req.body.images.length
+        ? req.body.images.slice(0, 5).map(String).filter((url) => /^https?:\/\//.test(url))
+        : []
+    const finalImages = images.length ? images : [String(serviceImage).trim()]
     const now = new Date()
     const doc = {
       vendorId: req.user.id,
@@ -166,8 +171,8 @@ export function registerSecureRoutes(app, collections) {
       description: String(description).trim(),
       price: Number(price),
       location: String(location).trim(),
-      images: [String(serviceImage).trim()],
-      serviceImage: String(serviceImage).trim(),
+      images: finalImages,
+      serviceImage: finalImages[0],
       vendorInfo: { name: req.user.name, email: req.user.email, verified: false, rating: 0 },
       status: 'pending',
       approved: false,
@@ -208,12 +213,15 @@ export function registerSecureRoutes(app, collections) {
         if (count >= 3) return res.status(403).json({ message: 'Free plan allows at most 3 active services.' })
       }
       update.active = !service.active
-      update.status = 'pending'
-      update.approved = false
     } else {
       const errors = validateService(req.body)
       if (Object.keys(errors).length) return res.status(400).json({ message: 'Please fix the highlighted fields.', errors })
       const { serviceName, category, description, price, location, serviceImage } = req.body
+      const images =
+        Array.isArray(req.body.images) && req.body.images.length
+          ? req.body.images.slice(0, 5).map(String).filter((url) => /^https?:\/\//.test(url))
+          : []
+      const finalImages = images.length ? images : [String(serviceImage).trim()]
       Object.assign(update, {
         serviceName: String(serviceName).trim(),
         category: String(category).trim(),
@@ -221,8 +229,8 @@ export function registerSecureRoutes(app, collections) {
         description: String(description).trim(),
         price: Number(price),
         location: String(location).trim(),
-        serviceImage: String(serviceImage).trim(),
-        images: [String(serviceImage).trim()],
+        serviceImage: finalImages[0],
+        images: finalImages,
         status: 'pending',
         approved: false,
         active: false,
