@@ -33,6 +33,12 @@ function validateService(body) {
   return errors
 }
 
+async function vendorPlan(req, users) {
+  if (!ObjectId.isValid(req.user?.id)) return req.user?.plan ?? 'free'
+  const doc = await users.findOne({ _id: new ObjectId(req.user.id) })
+  return doc?.plan ?? req.user?.plan ?? 'free'
+}
+
 export function registerSecureRoutes(app, collections) {
   const { services, bookings, users, transactions } = collections
 
@@ -151,7 +157,7 @@ export function registerSecureRoutes(app, collections) {
     if (Object.keys(errors).length) return res.status(400).json({ message: 'Please fix the highlighted fields.', errors })
 
     const activeCount = await services.countDocuments({ vendorId: req.user.id, active: true })
-    if ((req.user.plan ?? 'free') !== 'premium' && activeCount >= 3) {
+    if ((await vendorPlan(req, users)) !== 'premium' && activeCount >= 3) {
       return res.status(403).json({ message: 'Free plan allows at most 3 active services. Upgrade to Premium.' })
     }
 
@@ -208,7 +214,7 @@ export function registerSecureRoutes(app, collections) {
         reviewedAt: new Date(),
       })
     } else if (req.body?.action === 'toggle') {
-      if (!service.active && (req.user.plan ?? 'free') !== 'premium') {
+      if (!service.active && (await vendorPlan(req, users)) !== 'premium') {
         const count = await services.countDocuments({ vendorId: req.user.id, active: true })
         if (count >= 3) return res.status(403).json({ message: 'Free plan allows at most 3 active services.' })
       }
@@ -290,7 +296,6 @@ export function registerSecureRoutes(app, collections) {
     const clientUrl = process.env.CLIENT_URL ?? 'http://localhost:3000'
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card'],
       line_items: [{
         price_data: {
           currency: 'usd',
@@ -308,7 +313,65 @@ export function registerSecureRoutes(app, collections) {
     res.json({ url: session.url })
   })
 
-  // Display-only verification — activation happens exclusively via webhook.
+  // Reconciliation fallback for missed webhooks (e.g. local development).
+  // The session id comes from the redirect, but activation only happens after
+  // this server re-queries Stripe and confirms a verified, paid session for
+  // the authenticated vendor. Idempotent by stripeSessionId.
+  app.post('/api/subscription/verify', verifyToken, requireRole('vendor'), async (req, res) => {
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(503).json({ message: 'Stripe is not configured.' })
+    }
+    const sessionId = String(req.body?.sessionId ?? '')
+    if (!sessionId.startsWith('cs_')) {
+      return res.status(400).json({ message: 'Invalid checkout session.' })
+    }
+
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+    const session = await stripe.checkout.sessions.retrieve(sessionId)
+
+    if (
+      session.payment_status !== 'paid' ||
+      session.status !== 'complete' ||
+      session.metadata?.plan !== 'premium' ||
+      session.metadata?.vendorId !== req.user.id
+    ) {
+      return res.status(400).json({ message: 'This payment was not verified for your account.' })
+    }
+
+    const seen = await transactions.findOne({ stripeSessionId: sessionId })
+    if (!seen) {
+      const now = new Date()
+      const expires = new Date(now)
+      expires.setFullYear(expires.getFullYear() + 1)
+      await transactions.insertOne({
+        vendorId: req.user.id,
+        plan: 'premium',
+        amount: (session.amount_total ?? 999) / 100,
+        currency: session.currency ?? 'usd',
+        stripeSessionId: sessionId,
+        stripeSubscriptionId: session.subscription ?? null,
+        status: 'succeeded',
+        createdAt: now,
+      })
+      await users.updateOne(
+        { _id: new ObjectId(req.user.id) },
+        {
+          $set: {
+            plan: 'premium',
+            subscriptionPlan: 'premium',
+            subscriptionExpiresAt: expires,
+            updatedAt: now,
+          },
+        }
+      )
+    }
+
+    const fresh = await users.findOne({ _id: new ObjectId(req.user.id) })
+    res.json({ activated: true, plan: fresh?.plan ?? 'premium', alreadyRecorded: !!seen })
+  })
+
+  // Display-only verification — activation happens exclusively via webhook
+  // or the server-side reconciliation route above.
   app.get('/api/subscription/session', verifyToken, async (req, res) => {
     if (!process.env.STRIPE_SECRET_KEY) return res.status(503).json({ message: 'Stripe is not configured.' })
     const sessionId = String(req.query.session_id ?? '')
